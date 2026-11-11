@@ -1,0 +1,42 @@
+name: Validate plugin source
+
+on:
+  push:
+    branches: [master, "develop/**"]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check manifest syntax and package references
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import xml.etree.ElementTree as ET
+          manifest = Path("i915-sriov.plg").read_text()
+          entities = dict(re.findall(r'<!ENTITY\s+(\w+)\s+"([^"]*)">', manifest))
+          for name in ("name", "version", "md5"):
+              assert name in entities, f"Missing {name} entity"
+          assert re.fullmatch(r"[0-9a-fA-F]{32}", entities["md5"]), "Invalid MD5 digest"
+          # ElementTree does not resolve the document's named entities, so replace them.
+          body = re.sub(r"<!DOCTYPE\s+PLUGIN\s+\[.*?\]>", "", manifest, flags=re.S)
+          for _ in range(5):
+              body = re.sub(r"&([A-Za-z][A-Za-z0-9]*);", lambda m: entities.get(m.group(1), m.group(0)), body)
+              entities = {k: re.sub(r"&([A-Za-z][A-Za-z0-9]*);", lambda m: entities.get(m.group(1), m.group(0)), v) for k, v in entities.items()}
+          ET.fromstring(body)
+          package = Path("packages") / f"unraid-{entities['name']}-{entities['version']}.txz"
+          assert package.is_file(), f"Plugin package missing: {package}"
+          import hashlib
+          actual = hashlib.md5(package.read_bytes()).hexdigest()
+          assert actual.lower() == entities["md5"].lower(), "Plugin package checksum mismatch"
+          print(f"Validated manifest and {package.name}")
+          PY
